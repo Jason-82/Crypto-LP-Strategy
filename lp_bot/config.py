@@ -53,7 +53,8 @@ class Config:
     reward_haircut: float = 0.5            # value emissions at 50 cents on the dollar
     horizon_days: int = 30                 # holding period used to amortise costs
     default_range_width: float = 3.0       # symmetric CL range [P/3, P*3]; None = full range
-    cl_fee_amp_share: float = 0.5          # fraction of IL amplification credited to fees
+    cl_fee_amp_share: float = 0.0          # fraction of IL amplification credited to fees (0 = pool average)
+    stable_sigma_threshold: float = 0.15   # below this, a CL pool is scored without the range model
     max_sigma: float = 1.5                 # skip pairs more volatile than this (annualised)
     max_expected_il_apr: float = 0.35      # skip when expected IL alone exceeds 35 %/yr
     min_net_apr: float = 0.04              # 4 % net after IL and costs

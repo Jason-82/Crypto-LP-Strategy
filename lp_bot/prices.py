@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -178,24 +179,59 @@ class DefiLlamaPrices(PriceSource):
 
     def _get(self, path: str) -> Dict:
         req = urllib.request.Request(self.base_url + path, headers={"User-Agent": "lp_bot/0.1"})
-        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-            return json.load(resp)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read(300).decode("utf-8", "replace").strip()
+            except Exception:
+                pass
+            raise RuntimeError(f"HTTP {exc.code} for {path[:120]} :: {body}") from None
+
+    @staticmethod
+    def _series(payload: Dict) -> Dict[str, List[float]]:
+        out: Dict[str, List[float]] = {}
+        for key, rec in (payload.get("coins") or {}).items():
+            pts = sorted(rec.get("prices") or [], key=lambda p: p.get("timestamp", 0))
+            out[key] = [float(p["price"]) for p in pts if p.get("price")]
+        return out
+
+    def _chart(self, keys: List[str], days: int) -> Dict[str, List[float]]:
+        """/chart/{coins}: one request for up to 10 coins, daily points ending yesterday."""
+        start = int(time.time()) - (days + 1) * 86400
+        q = urllib.parse.urlencode({"start": start, "span": days, "period": "1d"})
+        chunk = urllib.parse.quote(",".join(keys), safe=",:")
+        return self._series(self._get(f"/chart/{chunk}?{q}"))
+
+    def _batch_historical(self, keys: List[str], days: int) -> Dict[str, List[float]]:
+        """/batchHistorical: fallback that asks for explicit daily timestamps."""
+        now = int(time.time()) - 3600
+        stamps = [now - i * 86400 for i in range(days, 0, -1)]
+        coins = json.dumps({k: stamps for k in keys}, separators=(",", ":"))
+        q = urllib.parse.urlencode({"coins": coins, "searchWidth": "6h"})
+        return self._series(self._get(f"/batchHistorical?{q}"))
 
     def history(self, keys: Sequence[str], days: int) -> Dict[str, List[float]]:
         out: Dict[str, List[float]] = {}
-        keys = list(dict.fromkeys(keys))
-        start = int(time.time()) - days * 86400
+        keys = list(dict.fromkeys(k for k in keys if k))
+        use_batch = False
         for i in range(0, len(keys), 10):
-            chunk = ",".join(keys[i:i + 10])
-            q = urllib.parse.urlencode({"start": start, "span": days, "period": "1d"})
-            try:
-                payload = self._get(f"/chart/{urllib.parse.quote(chunk, safe=',:')}?{q}")
-            except Exception as exc:  # one bad chunk must not blank out every other pool
-                self.errors.append(f"chart {keys[i][:40]}...: {exc}")
-                continue
-            for key, rec in (payload.get("coins") or {}).items():
-                pts = sorted(rec.get("prices") or [], key=lambda p: p.get("timestamp", 0))
-                out[key] = [float(p["price"]) for p in pts if p.get("price")]
+            chunk = keys[i:i + 10]
+            if not use_batch:
+                try:
+                    out.update(self._chart(chunk, days))
+                    continue
+                except Exception as exc:  # switch to the fallback endpoint for the rest
+                    self.errors.append(f"chart endpoint failed, falling back to batchHistorical: {exc}")
+                    use_batch = True
+            for j in range(0, len(chunk), 3):
+                sub = chunk[j:j + 3]
+                try:
+                    out.update(self._batch_historical(sub, days))
+                except Exception as exc:  # one bad batch must not blank out every other pool
+                    self.errors.append(f"batchHistorical {sub[0][:40]}...: {exc}")
         return out
 
     def current(self, keys: Sequence[str]) -> Dict[str, float]:

@@ -88,6 +88,11 @@ def evaluate(pool: Pool, cfg: Config, vol: VolEstimator, size_usd: Optional[floa
         sigma = min(sigma, 0.02)
     concentrated = is_concentrated(pool)
     range_width = cfg.default_range_width if concentrated else None
+    if concentrated and sigma < cfg.stable_sigma_threshold:
+        # Stable pairs are LP'd in tight ranges; the pool-level APY already reflects that and
+        # the symmetric wide-range model does not apply. Take the pool number at face value.
+        range_width = None
+        notes.append("stable pair: pool APY taken at face value, no range model")
     amp = amplification(range_width)
     fee_amp = 1.0 + (amp - 1.0) * cfg.cl_fee_amp_share
     exp_il = expected_il_rate(sigma, amp)

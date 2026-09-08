@@ -113,6 +113,14 @@ def test_sources_and_scoring():
     check(close(conservative_fee_apr(capped)[0], 0.30), "fee apr capped at 1.5x 30d mean")
 
     cfg = Config()
+    stable_cl = Pool("s", "Ethereum", "ekubo", "USDC-USDG", 5e6, 20.0, apy_base=20.0)
+    from .scoring import evaluate
+    o = evaluate(stable_cl, cfg, VolEstimator(NullPrices(), 90))
+    check(o.range_width is None and close(o.amp, 1.0), "stable pair in a CL pool skips the range model")
+    vol_cl = evaluate(Pool("v", "Base", "uniswap-v3", "WETH-USDC", 5e6, 30.0, apy_base=30.0), cfg,
+                      VolEstimator(NullPrices(), 90))
+    check(vol_cl.range_width == cfg.default_range_width and vol_cl.amp > 2 and close(vol_cl.fee_amp, 1.0),
+          "volatile CL pair: amplified IL, pool-average fees")
     opps, tally, why = rank(pools, cfg, VolEstimator(NullPrices(), 90))
     ids = {o.pool.pool_id for o in opps}
     expect_reject = {
@@ -262,7 +270,8 @@ def test_manager():
 
 def test_rotation_and_loss_limit():
     with tempfile.TemporaryDirectory() as tmp:
-        cfg, state, ex, vol, mgr = _mgr(tmp, max_positions=1, rotation_margin_apr=0.05)
+        # a 90-day horizon so the +12 pp gain outweighs two rounds of switching costs
+        cfg, state, ex, vol, mgr = _mgr(tmp, max_positions=1, rotation_margin_apr=0.05, horizon_days=90)
         pools = _mini_pools()
         weak = next(p for p in FilePoolSource(FIXTURE).fetch() if p.pool_id == "fx-arb-uni3-weth-usdc")
         strong = next(p for p in pools if p.pool_id == "fx-sol-ray-clmm-sol-usdc")

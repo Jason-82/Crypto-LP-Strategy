@@ -4,6 +4,7 @@
     python3 -m lp_bot run   [--source live|FILE] [--prices live|none] [--once | --interval-min 60]
     python3 -m lp_bot status
     python3 -m lp_bot il --k 1.5 [--range 2.0]
+    python3 -m lp_bot prices [coin keys...]
     python3 -m lp_bot self-test
 """
 
@@ -172,6 +173,25 @@ def cmd_il(args) -> int:
     return 0
 
 
+def cmd_prices(args) -> int:
+    """Fetch history for a few coin keys and report what came back. For debugging the feed."""
+    from .prices import realised_vol
+    cfg = load_config(args.config)
+    src = DefiLlamaPrices(cfg.prices_url, cfg.http_timeout_s)
+    series = src.history(args.keys, args.days)
+    for k in args.keys:
+        pts = series.get(k, [])
+        if pts:
+            rv = realised_vol(pts)
+            print(f"{k}: {len(pts)} points, first {pts[0]:.6g}, last {pts[-1]:.6g}, "
+                  f"annualised vol {rv:.2f}" if rv is not None else f"{k}: {len(pts)} points (too few for vol)")
+        else:
+            print(f"{k}: no data")
+    for e in src.errors:
+        print(f"error: {e}")
+    return 0 if series and not src.errors else 1
+
+
 def cmd_selftest(_args) -> int:
     from .selftest import run_all
     return run_all()
@@ -211,6 +231,13 @@ def build_parser() -> argparse.ArgumentParser:
     il.add_argument("--sigma", type=float, default=None)
     il.add_argument("--budget", type=float, default=None, help="IL budget as decimal, e.g. 0.03")
     il.set_defaults(fn=cmd_il)
+
+    pr = sub.add_parser("prices", help="debug the price-history feed for a few coin keys")
+    pr.add_argument("keys", nargs="*", default=["coingecko:ethereum", "coingecko:tether",
+                                                 "solana:So11111111111111111111111111111111111111112"])
+    pr.add_argument("--days", type=int, default=30)
+    pr.add_argument("--config")
+    pr.set_defaults(fn=cmd_prices)
 
     t = sub.add_parser("self-test", help="run deterministic checks")
     t.set_defaults(fn=cmd_selftest)

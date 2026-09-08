@@ -57,6 +57,7 @@ python3 -m lp_bot run --config my.json --once            # one paper cycle, pers
 python3 -m lp_bot run --config my.json --interval-min 60 # loop
 python3 -m lp_bot status
 python3 -m lp_bot il --k 1.5 --range 3 --sigma 0.7 --budget 0.03
+python3 -m lp_bot prices coingecko:ethereum coingecko:tether   # debug the price feed
 ```
 
 On Windows use `python` instead of `python3` and `copy` instead of `cp`.
@@ -87,9 +88,11 @@ In live mode the planner only enters pools whose protocol has an adapter.
 * Fees are modelled from the source's fee APY, not read on-chain, until an adapter does so.
 * Expected IL uses the second-order lognormal approximation; it understates very large moves.
   The realised-IL stop, not the estimate, is what protects a position.
-* Concentrated pools are modelled as symmetric ranges; DefiLlama's pool-level fee APY does not
-  say what a specific range earns, so only half the range amplification is credited to fees
-  (`cl_fee_amp_share`). Tune it against your own fills.
+* Concentrated pools are modelled as symmetric ranges of `default_range_width`. That
+  amplifies IL, but fees are credited at the pool-average APY (`cl_fee_amp_share` = 0) because
+  DefiLlama's pool-level number does not say what a specific range earns. Raise the share only
+  once your own fills justify it. Stable pairs (sigma below `stable_sigma_threshold`) skip the
+  range model entirely and take the pool APY at face value.
 * Three-plus-token pools are reduced to their most volatile pair for IL purposes.
 * Volatility falls back to class heuristics when price history cannot be fetched; the scan
   output says which was used.
