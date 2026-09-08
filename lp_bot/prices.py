@@ -28,6 +28,8 @@ STABLES = {
     "USDA", "USDX", "USR", "RLUSD", "DEUSD", "SFRAX", "SDAI", "USD+", "USDT0", "BUIDL",
     "USD1", "USDG", "AUSD", "HONEY", "NECT", "USDN", "SUSD0", "USDZ", "USDL", "MUSD",
 }
+STABLES -= {"EURC", "EURS", "AGEUR", "EURA"}
+EUR_STABLES = {"EURC", "EURS", "AGEUR", "EURA", "EURE", "EURT", "CEUR", "EURCV", "EUROC", "EURO3", "EURI"}
 ETH_FAMILY = {
     "ETH", "WETH", "STETH", "WSTETH", "RETH", "CBETH", "WEETH", "EETH", "EZETH", "RSETH",
     "METH", "SFRXETH", "FRXETH", "OSETH", "ETHX", "SWETH", "PUFETH", "ANKRETH", "LSETH",
@@ -57,6 +59,11 @@ COINGECKO_IDS = {
 # Annualised volatility of ln(Pa/Pb) by pair class when no history is available.
 HEURISTIC_PAIR_SIGMA = {
     ("stable", "stable"): 0.02,
+    ("eurstable", "eurstable"): 0.02,
+    ("eurstable", "stable"): 0.08,      # EUR/USD FX volatility
+    ("eth", "eurstable"): 0.72,
+    ("btc", "eurstable"): 0.57,
+    ("major", "eurstable"): 0.96,
     ("eth", "eth"): 0.06,
     ("btc", "btc"): 0.06,
     ("eth", "btc"): 0.40,
@@ -73,7 +80,9 @@ SINGLE_ASSET_SIGMA = 0.0
 
 def classify(symbol: str) -> str:
     s = symbol.upper().strip()
-    if s in STABLES or s.startswith(("USD", "SUSD", "EUR")) and len(s) <= 6:
+    if s in EUR_STABLES:
+        return "eurstable"
+    if s in STABLES or (s.startswith(("USD", "SUSD")) and len(s) <= 6):
         return "stable"
     if s in ETH_FAMILY:
         return "eth"
@@ -105,7 +114,7 @@ def heuristic_sigma(tokens: Sequence[str]) -> Tuple[float, str]:
 
 
 def _canon(key: Tuple[str, str]) -> Tuple[str, str]:
-    order = {"stable": 3, "eth": 1, "btc": 2, "major": 0}
+    order = {"stable": 4, "eurstable": 3, "eth": 1, "btc": 2, "major": 0}
     a, b = sorted(key, key=lambda c: order.get(c, 9))
     return (a, b)
 
@@ -165,6 +174,7 @@ class DefiLlamaPrices(PriceSource):
     def __init__(self, base_url: str = "https://coins.llama.fi", timeout_s: int = 30):
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self.errors: List[str] = []
 
     def _get(self, path: str) -> Dict:
         req = urllib.request.Request(self.base_url + path, headers={"User-Agent": "lp_bot/0.1"})
@@ -175,10 +185,14 @@ class DefiLlamaPrices(PriceSource):
         out: Dict[str, List[float]] = {}
         keys = list(dict.fromkeys(keys))
         start = int(time.time()) - days * 86400
-        for i in range(0, len(keys), 20):
-            chunk = ",".join(keys[i:i + 20])
+        for i in range(0, len(keys), 10):
+            chunk = ",".join(keys[i:i + 10])
             q = urllib.parse.urlencode({"start": start, "span": days, "period": "1d"})
-            payload = self._get(f"/chart/{urllib.parse.quote(chunk, safe=',:')}?{q}")
+            try:
+                payload = self._get(f"/chart/{urllib.parse.quote(chunk, safe=',:')}?{q}")
+            except Exception as exc:  # one bad chunk must not blank out every other pool
+                self.errors.append(f"chart {keys[i][:40]}...: {exc}")
+                continue
             for key, rec in (payload.get("coins") or {}).items():
                 pts = sorted(rec.get("prices") or [], key=lambda p: p.get("timestamp", 0))
                 out[key] = [float(p["price"]) for p in pts if p.get("price")]
@@ -240,6 +254,12 @@ class VolEstimator:
         self.history_days = history_days
         self._hist_cache: Dict[str, List[float]] = {}
         self._pool_cache: Dict[str, Tuple[float, str, float]] = {}
+        self.warnings: List[str] = []
+
+    def stats(self) -> Dict[str, int]:
+        """How many scored pools used realised history versus a heuristic."""
+        hist = sum(1 for v in self._pool_cache.values() if v[1] == "history")
+        return {"history": hist, "heuristic": len(self._pool_cache) - hist}
 
     def prefetch(self, pools: Iterable[Pool]) -> None:
         wanted = set()
@@ -251,8 +271,13 @@ class VolEstimator:
             return
         try:
             fetched = self.prices.history(sorted(wanted), self.history_days)
-        except Exception:  # network failure -> heuristics only
+        except Exception as exc:  # network failure -> heuristics only
             fetched = {}
+            self.warnings.append(f"price history unavailable: {exc}")
+        errs = getattr(self.prices, "errors", None)
+        if errs:
+            self.warnings.extend(errs)
+            del errs[:]
         for k in wanted:
             self._hist_cache[k] = fetched.get(k, [])
 

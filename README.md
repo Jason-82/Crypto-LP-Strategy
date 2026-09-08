@@ -59,7 +59,9 @@ python3 -m lp_bot status
 python3 -m lp_bot il --k 1.5 --range 3 --sigma 0.7 --budget 0.03
 ```
 
-Copy `config.example.json`, edit, and pass it with `--config`. State lives in
+On Windows use `python` instead of `python3` and `copy` instead of `cp`.
+
+Copy `lp_bot/config.example.json`, edit, and pass it with `--config`. State lives in
 `lp_bot_state.json` (git-ignored). Touch `lp_bot.STOP` to close everything and halt.
 
 ## Going live

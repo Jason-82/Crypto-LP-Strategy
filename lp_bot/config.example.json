@@ -35,6 +35,7 @@
   "max_pct_per_pool": 0.20,
   "max_pct_per_project": 0.35,
   "max_pct_per_chain": 0.50,
+  "max_share_of_pool_tvl": 0.005,
   "cash_reserve_pct": 0.05,
 
   "il_stop_pct": 0.03,

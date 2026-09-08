@@ -65,6 +65,8 @@ def test_prices():
     check(classify("USDC") == "stable" and classify("wstETH") == "eth" and classify("cbBTC") == "btc", "classify")
     check(classify("SOL") == "major" and classify("BRETT") == "exotic", "classify majors/exotic")
     check(close(heuristic_sigma(["USDC", "USDT"])[0], 0.02), "stable pair heuristic")
+    check(classify("EURC") == "eurstable" and close(heuristic_sigma(["EURC", "USDC"])[0], 0.08), "euro stable vs usd stable carries FX vol")
+    check(close(heuristic_sigma(["EURC", "EURS"])[0], 0.02), "euro/euro is a stable pair")
     check(close(heuristic_sigma(["WETH", "USDC"])[0], 0.70), "eth/stable heuristic")
     check(close(heuristic_sigma(["DAI", "USDC", "USDT"])[0], 0.02), "3pool heuristic")
     check(heuristic_sigma(["BRETT", "WETH"])[0] > 1.0, "exotic heuristic")
@@ -185,6 +187,13 @@ def test_manager():
         check(n == 4, f"entered 4 positions (got {n})")
         equity = state.equity()
         check(all(p.size_usd <= cfg.max_pct_per_pool * 20_000 + 1e-6 for p in state.open_positions), "per-pool cap")
+        tiny = Config(state_path=os.path.join(tmp, "s2.json"), kill_switch_path=os.path.join(tmp, "K"),
+                      max_share_of_pool_tvl=0.0001)
+        st2 = State(cash_usd=20_000.0)
+        m2 = Manager(tiny, st2, PaperExecutor(tiny, 20_000.0), vol)
+        acts = m2.plan(opps, {p.pool_id: p for p in pools}, T0)
+        check(all(a.size_usd <= 0.0001 * a.opportunity.pool.tvl_usd + 1e-6 for a in acts if a.kind == "enter"),
+              "position capped as a share of pool tvl")
         check(state.cash_usd >= cfg.cash_reserve_pct * equity - 1e-6, "cash reserve kept")
         check(19_900 < equity < 20_000, f"equity after entry costs ~20k (got {equity:.2f})")
         save_state(cfg.state_path, state)

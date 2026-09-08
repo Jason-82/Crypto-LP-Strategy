@@ -197,6 +197,7 @@ class Manager:
             cap = min(cfg.max_position_usd, cfg.max_pct_per_pool * equity)
             cap = min(cap, cfg.max_pct_per_project * equity - by_project.get(pool.project, 0.0))
             cap = min(cap, cfg.max_pct_per_chain * equity - by_chain.get(pool.chain.lower(), 0.0))
+            cap = min(cap, cfg.max_share_of_pool_tvl * pool.tvl_usd)
             size = min(cap, cash_avail)
             if size < cfg.min_position_usd:
                 continue

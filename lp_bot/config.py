@@ -67,6 +67,7 @@ class Config:
     max_pct_per_pool: float = 0.20
     max_pct_per_project: float = 0.35
     max_pct_per_chain: float = 0.50
+    max_share_of_pool_tvl: float = 0.005   # never be more than 0.5 % of a pool
     cash_reserve_pct: float = 0.05
 
     # --- position management ----------------------------------------------------------

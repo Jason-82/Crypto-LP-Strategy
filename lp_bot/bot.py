@@ -51,25 +51,35 @@ def _fetch(source) -> List[Pool]:
         return []
 
 
-def print_scan(opps: List[Opportunity], tally, top: int, explain: bool, why, pools: List[Pool]) -> None:
+def print_scan(opps: List[Opportunity], tally, top: int, explain: bool, why, pools: List[Pool],
+               vol: Optional[VolEstimator] = None, cfg: Optional[Config] = None) -> None:
     print(f"{'#':>3} {'chain':<10} {'project':<24} {'pair':<22} {'tvl':>10} {'apy':>7} "
           f"{'fee':>6} {'rew':>6} {'sigma':>5} {'E[IL]':>6} {'net':>7} {'score':>7}")
     for i, o in enumerate(opps[:top], 1):
         print(f"{i:>3} {o.summary()}")
-        if explain and o.notes:
-            print(f"      notes: {'; '.join(o.notes)} | vol {o.vol_source} | amp {o.amp:.2f} "
-                  f"| breakeven fee {o.breakeven_fee_apr*100:.1f}%")
+        if explain:
+            extra = f"; {'; '.join(o.notes)}" if o.notes else ""
+            print(f"      vol {o.vol_source} | amp {o.amp:.2f} | breakeven fee {o.breakeven_fee_apr*100:.1f}%"
+                  f" | {o.pool.url}{extra}")
     print()
     print(f"{len(opps)} opportunities from {len(pools)} pools. Rejections:")
     for reason, n in tally.most_common():
         print(f"  {n:>6}  {reason}")
+    if vol is not None:
+        st = vol.stats()
+        print(f"\nvolatility source: {st['history']} pools from price history, {st['heuristic']} from heuristics")
+        for w in vol.warnings[:5]:
+            print(f"  warning: {w}")
+        if len(vol.warnings) > 5:
+            print(f"  ... {len(vol.warnings) - 5} more warnings")
     if explain:
-        print("\nTop rejected by raw APY (why the headline number was not enough):")
-        by_id = {p.pool_id: p for p in pools}
-        rejected = sorted((p for p in pools if p.pool_id in why), key=lambda p: p.apy, reverse=True)
+        floor = cfg.min_tvl_usd if cfg else 0.0
+        print(f"\nHighest-APY pools above the TVL floor that were still rejected:")
+        rejected = sorted((p for p in pools if p.pool_id in why and p.tvl_usd >= floor and not p.outlier),
+                          key=lambda p: p.apy, reverse=True)
         for p in rejected[:15]:
-            print(f"  {p.chain:<10} {p.project:<24} {p.symbol:<22} apy {p.apy:7.1f}%  -> {', '.join(why[p.pool_id])}")
-        _ = by_id
+            print(f"  {p.chain:<10} {p.project:<24} {p.symbol:<22} tvl ${p.tvl_usd/1e6:6.1f}M apy {p.apy:7.1f}%"
+                  f"  -> {', '.join(why[p.pool_id])}")
 
 
 def cmd_scan(args) -> int:
@@ -81,7 +91,7 @@ def cmd_scan(args) -> int:
         return 1
     vol = VolEstimator(_prices(args.prices, cfg), cfg.price_history_days)
     opps, tally, why = rank(pools, cfg, vol)
-    print_scan(opps, tally, args.top, args.explain, why, pools)
+    print_scan(opps, tally, args.top, args.explain, why, pools, vol, cfg)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump([{**o.pool.to_dict(), "fee_apr": o.fee_apr, "reward_apr": o.reward_apr,
