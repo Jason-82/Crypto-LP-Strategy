@@ -1,0 +1,53 @@
+{
+  "mode": "paper",
+  "starting_cash_usd": 25000,
+  "state_path": "lp_bot_state.json",
+  "kill_switch_path": "lp_bot.STOP",
+
+  "chains": [],
+  "chain_blocklist": [],
+  "project_blocklist": [],
+  "token_blocklist": [],
+  "require_multi_asset": true,
+  "allow_reward_heavy": false,
+
+  "min_tvl_usd": 2000000,
+  "min_pool_age_days": 30,
+  "min_apy_pct": 5,
+  "max_apy_pct": 250,
+  "max_reward_share": 0.6,
+  "min_volume_tvl_ratio_7d": 0.05,
+  "reject_outliers": true,
+
+  "reward_haircut": 0.5,
+  "horizon_days": 30,
+  "default_range_width": 3.0,
+  "cl_fee_amp_share": 0.5,
+  "max_sigma": 1.5,
+  "max_expected_il_apr": 0.35,
+  "min_net_apr": 0.04,
+  "slippage_bps_per_side": 30,
+  "gas_roundtrip_usd": {"ethereum": 60, "arbitrum": 1.5, "base": 1.0, "solana": 0.5},
+
+  "max_positions": 8,
+  "min_position_usd": 500,
+  "max_position_usd": 10000,
+  "max_pct_per_pool": 0.20,
+  "max_pct_per_project": 0.35,
+  "max_pct_per_chain": 0.50,
+  "cash_reserve_pct": 0.05,
+
+  "il_stop_pct": 0.03,
+  "price_move_stop": 0.0,
+  "out_of_range_grace_hours": 12,
+  "apy_decay_ratio": 0.5,
+  "tvl_drop_ratio": 0.5,
+  "min_hold_hours": 48,
+  "max_hold_days": 90,
+  "rotation_margin_apr": 0.08,
+  "reentry_cooldown_hours": 24,
+  "daily_loss_limit_pct": 0.05,
+
+  "price_history_days": 90,
+  "http_timeout_s": 30
+}
