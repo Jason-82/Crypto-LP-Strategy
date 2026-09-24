@@ -6,6 +6,7 @@
 
   "chains": [],
   "chain_blocklist": [],
+  "_blocklists": "project_blocklist and token_blocklist ADD to the built-in defaults (perps liquidity pools, tokenised stocks); see lp_bot/config.py",
   "project_blocklist": [],
   "token_blocklist": [],
   "require_multi_asset": true,

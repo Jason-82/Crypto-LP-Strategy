@@ -9,7 +9,9 @@ and test per protocol before real funds touch it.** Not financial advice.
    and normalises them into one `Pool` record. Add other venues by implementing `PoolSource`.
 2. **Filter out traps.** TVL floor, pool age, outlier flag, implausible APY, emission-heavy
    APY, single-asset vaults (not LPing), turnover too low for the fee number to be real, chain,
-   protocol and token block lists.
+   protocol and token block lists. Perpetual-futures liquidity pools (GMX, Gains, Jupiter
+   perps and similar) and tokenised-stock pairs are blocked by default because the IL model does
+   not describe their risk; your config's lists add to those defaults.
 3. **Score net of impermanent loss.** For each survivor it estimates the volatility of the
    pair's price ratio (realised from 90 days of price history when available, class-based
    heuristics otherwise) and computes

@@ -260,6 +260,11 @@ def test_manager():
         # pool disappears -> hard exit
         r = mgr.exit_reason(velo, None, T0 + timedelta(hours=4))
         check(r is not None and r[1], "missing pool is a hard exit")
+        # pool becomes blocked by config -> hard exit
+        cfg.project_blocklist.append(velo_pool.project)
+        r = mgr.exit_reason(velo, velo_pool, T0 + timedelta(hours=4))
+        check(r is not None and r[1] and "excluded by config" in r[0], "newly blocked pool is a hard exit")
+        cfg.project_blocklist.remove(velo_pool.project)
 
         # kill switch -> everything exits, nothing enters
         open(cfg.kill_switch_path, "w").close()
@@ -301,6 +306,11 @@ def test_rotation_and_loss_limit():
 def test_config():
     cfg = load_config(os.path.join(HERE, "config.example.json"))
     check(cfg.mode == "paper" and cfg.gas_for("Ethereum") == 60 and cfg.gas_for("zksync") == 3.0, "example config loads")
+    check("gmx-v2-perps" in cfg.project_blocklist and "CRCLX" in cfg.token_blocklist, "default blocklists survive an empty config list")
+    perp = Pool("g", "Avalanche", "gmx-v2-perps", "AVAX-USDC", 5e6, 30.0, apy_base=30.0)
+    check("project blocked" in reject_reasons(perp, Config()), "perps liquidity pool blocked by default")
+    stock = Pool("x", "Solana", "raydium-amm", "CRCLX-USDC", 5e6, 30.0, apy_base=30.0)
+    check("token blocked" in reject_reasons(stock, Config()), "tokenised stock blocked by default")
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         json.dump({"bogus": 1}, fh)
     try:

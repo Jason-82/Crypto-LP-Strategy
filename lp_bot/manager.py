@@ -20,7 +20,7 @@ from .executors import Executor, tradable_live
 from .il import impermanent_loss, in_range
 from .models import Opportunity, Pool, Position
 from .prices import VolEstimator
-from .scoring import evaluate
+from .scoring import evaluate, reject_reasons
 from .state import State
 
 
@@ -102,6 +102,9 @@ class Manager:
             return ("pool no longer reported by source", True)
         if cfg.reject_outliers and pool_now.outlier:
             return ("source flagged pool as outlier", True)
+        blocked = [r for r in reject_reasons(pool_now, cfg) if r.endswith("blocked")]
+        if blocked:
+            return (f"pool now excluded by config ({blocked[0]})", True)
         if pos.net_pnl_usd < -cfg.il_stop_pct * pos.size_usd:
             return (f"IL budget breached (net {pos.net_pnl_usd:+.2f} USD)", True)
         k = pos.last_price_ratio / pos.entry_price_ratio if pos.entry_price_ratio > 0 else 1.0
