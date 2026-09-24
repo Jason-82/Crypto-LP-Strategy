@@ -176,6 +176,7 @@ class DefiLlamaPrices(PriceSource):
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
         self.errors: List[str] = []
+        self.bad_keys: List[str] = []
 
     def _get(self, path: str) -> Dict:
         req = urllib.request.Request(self.base_url + path, headers={"User-Agent": "lp_bot/0.1"})
@@ -214,24 +215,35 @@ class DefiLlamaPrices(PriceSource):
         return self._series(self._get(f"/batchHistorical?{q}"))
 
     def history(self, keys: Sequence[str], days: int) -> Dict[str, List[float]]:
+        """Chunked /chart first; a failed chunk is retried one key at a time so a single bad
+        key cannot blank out nine good ones; a key that still fails tries /batchHistorical."""
         out: Dict[str, List[float]] = {}
         keys = list(dict.fromkeys(k for k in keys if k))
-        use_batch = False
+        self.bad_keys: List[str] = []
         for i in range(0, len(keys), 10):
             chunk = keys[i:i + 10]
-            if not use_batch:
+            try:
+                out.update(self._chart(chunk, days))
+                continue
+            except Exception:
+                pass
+            for key in chunk:
                 try:
-                    out.update(self._chart(chunk, days))
+                    out.update(self._chart([key], days))
                     continue
-                except Exception as exc:  # switch to the fallback endpoint for the rest
-                    self.errors.append(f"chart endpoint failed, falling back to batchHistorical: {exc}")
-                    use_batch = True
-            for j in range(0, len(chunk), 3):
-                sub = chunk[j:j + 3]
-                try:
-                    out.update(self._batch_historical(sub, days))
-                except Exception as exc:  # one bad batch must not blank out every other pool
-                    self.errors.append(f"batchHistorical {sub[0][:40]}...: {exc}")
+                except Exception as chart_exc:
+                    try:
+                        got = self._batch_historical([key], days)
+                        if got.get(key):
+                            out.update(got)
+                            continue
+                    except Exception:
+                        pass
+                    self.bad_keys.append(key)
+                    if len(self.errors) < 8:
+                        self.errors.append(f"{key}: {chart_exc}")
+        if self.bad_keys:
+            self.errors.append(f"{len(self.bad_keys)} coin keys returned no history")
         return out
 
     def current(self, keys: Sequence[str]) -> Dict[str, float]:

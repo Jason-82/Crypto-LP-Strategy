@@ -111,6 +111,8 @@ def test_sources_and_scoring():
     check(close(fee, 0.128), "conservative fee apr takes the 7d figure")
     capped = Pool("c", "Ethereum", "uniswap-v3", "A-B", 1e7, 100.0, apy_base=100.0, apy_mean_30d=20.0)
     check(close(conservative_fee_apr(capped)[0], 0.30), "fee apr capped at 1.5x 30d mean")
+    no30 = Pool("n", "Ethereum", "uniswap-v3", "A-B", 1e7, 100.0, apy_base=100.0)
+    check(close(conservative_fee_apr(no30)[0], 0.50), "fee apr halved without a 30d mean")
 
     cfg = Config()
     stable_cl = Pool("s", "Ethereum", "ekubo", "USDC-USDG", 5e6, 20.0, apy_base=20.0)

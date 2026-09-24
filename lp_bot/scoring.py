@@ -77,6 +77,10 @@ def conservative_fee_apr(pool: Pool) -> Tuple[float, List[str]]:
         if fee > cap:
             notes.append(f"fee apy capped at 1.5x 30d mean ({pool.apy_mean_30d:.1f}%)")
             fee = cap
+    else:
+        # No 30-day average to sanity-check against: a spike cannot be told from a trend.
+        notes.append("no 30d mean to cap against; fee apy halved")
+        fee *= 0.5
     return fee / 100.0, notes
 
 
