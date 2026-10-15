@@ -25,28 +25,70 @@ and test per protocol before real funds touch it.** Not financial advice.
    the slower of the 1-day and 7-day figures and is capped at 1.5x the 30-day mean, emissions
    are valued at 50 cents on the dollar, and gas plus slippage are amortised over the holding
    horizon. Every rejection carries a reason (`scan --explain`).
-4. **Manage positions.** Each cycle it marks every open position (fees accrued from the
-   pool's fee APR, IL from the price ratio move since entry, out-of-range detection for
-   concentrated positions) and applies exit rules:
+4. **Manage positions in USD.** Each position records the USD prices of both tokens at entry,
+   so every hourly mark splits its result into four parts:
+
+   * **market**: what simply holding the two tokens would have made or lost;
+   * **IL**: the LP's shortfall versus holding (amplified for concentrated ranges);
+   * **fees**: accrued at the pool's current fee rate while in range;
+   * **rewards**: emissions at the same 50 % haircut used when choosing the pool.
+
+   A position is never opened unless both tokens can be priced, and never when a stablecoin
+   leg is already off its peg. Prices come from contract addresses, falling back to CoinGecko
+   ids. Each cycle first marks every position and runs the hard exits, and only then does
+   the slow work of ranking new pools.
 
    | Rule | Default | Type |
    |---|---|---|
-   | Fees + IL below `-il_stop_pct` of size | 3 % | hard, immediate |
+   | Kill switch file present (works even when the feed is down) | `lp_bot.STOP` | hard, closes everything |
+   | Fees + rewards + IL below `-il_stop_pct` of size | 3 % | hard |
+   | A USD stablecoin leg trades off its peg (yield-bearing ones: falls below entry) | 2 % | hard |
+   | A tightly pegged pair (LST/ETH, BTC wrappers) diverges beyond its expected drift | 2 % | hard |
    | Out of range for longer than the grace period | 12 h | hard |
+   | Pool missing from an otherwise healthy feed | 24 h | hard |
+   | Position cannot be priced while others can | 6 h | hard |
+   | Pool excluded by a block list you added | — | hard |
    | Optional absolute price-move stop | off | hard |
-   | Pool vanished from the feed or flagged outlier | — | hard |
-   | Kill switch file present | `lp_bot.STOP` | hard, closes everything |
-   | APY fell below half of entry APY | 0.5x | soft, after `min_hold_hours` |
-   | TVL fell below half of entry TVL | 0.5x | soft |
-   | Held longer than `max_hold_days` | 90 d | soft |
-   | A better pool nets +8 pp after switching costs | 0.08 | rotation, after min hold |
+   | Expected to lose money from here (fees + rewards below expected IL) | `min_hold_apr` 0 % | soft, after `min_hold_hours` |
+   | 7-day fee rate below half of the rate bought on, and the pool would not be bought today | 0.5x | soft |
+   | Price-adjusted TVL below half of entry TVL | 0.5x | soft |
+   | Held `max_hold_days` and would not be bought today | 90 d | soft |
+   | Rotation: a better pool nets +8 pp over the weakest holding | 0.08 | soft, one per cycle |
 
-   Entries respect caps per pool, protocol, and chain, a cash reserve, a daily loss limit that
-   halts new entries, and a cooldown that blocks re-entering a pool that just stopped out.
-   Small positions are re-scored at their real size so gas cannot quietly eat them.
-5. **Execute.** `PaperExecutor` simulates mints and burns with per-chain gas and slippage.
-   `LiveExecutor` routes each protocol to a registered `ProtocolAdapter` and refuses to start
-   without an explicit environment acknowledgement, a signer, and at least one adapter.
+   Soft exits judge the position on its forward economics, using its own range model: the
+   smoothed 7-day fee rate and rewards against expected IL. Costs are left out of that test:
+   the entry cost is already spent and the exit cost is paid whether the bot sells now or
+   later. One quiet day or a spike fading back to normal is not a reason to sell. Fees are
+   booked on the liquidity's current value, and a single implausible fee print is capped at
+   3x the 7-day level so it cannot hide a real IL loss.
+
+   Entries are funded from free cash and free slots first. Rotation then pairs the best
+   candidate that could not be funded with the weakest holding, and only when the candidate
+   can actually be sized and priced. The daily loss limit blocks entries and rotations. A pool
+   that just exited cannot be re-entered for 24 h, and a pair that hit a hard stop cannot be
+   bought in any pool for 24 h. When the yields feed or the price feed is down, the bot holds,
+   runs the price-based stops, and buys nothing.
+
+   If the bot was not running, the first mark books the gap conservatively: the lower of the
+   before and after fee rates, and only if the position was in range at both ends.
+5. **Execute.** `PaperExecutor` simulates mints and burns with per-chain gas, slippage (lower
+   for pegged pairs), and a bridge hop for any chain other than `home_chain`. `LiveExecutor`
+   routes each protocol to a registered `ProtocolAdapter` and refuses to start without an
+   explicit environment acknowledgement, a signer, and at least one adapter.
+
+## Running it safely
+
+* Only one `run` can use a state file at a time; a second one exits with an error. `status`
+  is read-only and safe to run alongside the loop.
+* State is saved after each phase of a cycle with an fsync, the previous file is kept as
+  `lp_bot_state.json.bak`, and a corrupt main file falls back to it automatically.
+* An error inside a cycle is printed and the loop carries on; the yields feed is retried
+  three times before the cycle holds.
+* State files from older versions load as-is. Their positions switch to USD valuation on the
+  first mark: a stablecoin leg anchors the entry at $1, otherwise historical prices at the
+  entry time are used, and a stored placeholder ratio is replaced by the real one. The
+  one-off revaluation resets the daily-loss reference, and notes in `status` say what was
+  recovered. Delete `lp_bot_state.json` to start a fresh paper account.
 
 ## Usage
 
@@ -90,14 +132,22 @@ In live mode the planner only enters pools whose protocol has an adapter.
 * Fees are modelled from the source's fee APY, not read on-chain, until an adapter does so.
 * Expected IL uses the second-order lognormal approximation; it understates very large moves.
   The realised-IL stop, not the estimate, is what protects a position.
-* Concentrated pools are modelled as symmetric ranges of `default_range_width`. That
+* Volatile concentrated pools are modelled as symmetric ranges of `default_range_width`. That
   amplifies IL, but fees are credited at the pool-average APY (`cl_fee_amp_share` = 0) because
-  DefiLlama's pool-level number does not say what a specific range earns. Raise the share only
-  once your own fills justify it. Stable pairs (sigma below `stable_sigma_threshold`) skip the
-  range model entirely and take the pool APY at face value.
+  DefiLlama's pool-level number does not say what a specific range earns. A wide range
+  usually earns less than the pool average, so paper fees on concentrated pools are an upper
+  bound. Pegged pairs (sigma below `stable_sigma_threshold`) in concentrated pools are
+  modelled as a tight range around the peg, widened by the pair's measured drift so a
+  yield-bearing leg does not walk it out of range. Stableswap pools such as Curve have no
+  range; there the de-peg and divergence stops do the protecting.
+* Bridging is a flat cost per hop from `home_chain`; there is no bridge delay and no per-chain
+  gas inventory, so cross-chain paper results are still a little optimistic.
+* The turnover filter (`min_volume_tvl_ratio_7d`) is off by default and does not check the
+  fee figure against volume.
 * Three-plus-token pools are reduced to their most volatile pair for IL purposes.
 * Volatility falls back to class heuristics when price history cannot be fetched; the scan
   output says which was used.
-* Mainnet gas plus slippage on a $10k position amortised over 30 days is roughly 15 %/yr of
-  drag, which is why most Ethereum stable pools score below the floor at that size. Raise the
-  size, lengthen the horizon, or use L2s.
+* Costs are amortised over `horizon_days` at the size the bot would actually buy (20 % of
+  equity by default). Mainnet gas on a $5k position is a large drag, which is why most
+  Ethereum pools score below the floor at that size. Raise the size, lengthen the horizon, or
+  use L2s.

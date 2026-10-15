@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Dict, List, Optional
 
 
@@ -58,6 +58,9 @@ class Opportunity:
     confidence: float
     score: float
     notes: List[str] = field(default_factory=list)
+    size_usd: float = 0.0       # position size the costs were amortised over
+    stable_pair: bool = False   # pair volatility below the stable threshold
+    drift: float = 0.0          # annualised drift of the pair's price ratio (from history)
 
     def summary(self) -> str:
         p = self.pool
@@ -97,20 +100,43 @@ class Position:
     status: str = "open"      # open | closed
     closed_at: Optional[str] = None
     close_reason: Optional[str] = None
+    close_hard: bool = False
     realised_pnl_usd: Optional[float] = None
     entry_cost_usd: float = 0.0
     exit_cost_usd: float = 0.0
+    # --- USD valuation (added 2026-10). Legacy positions are migrated on their first mark.
+    leg_keys: List[str] = field(default_factory=list)       # coins-API keys of the two legs
+    leg_symbols: List[str] = field(default_factory=list)
+    entry_prices: List[float] = field(default_factory=list)  # USD prices of the legs at entry
+    last_prices: List[float] = field(default_factory=list)
+    peg_legs: List[int] = field(default_factory=list)       # indices of USD-stablecoin legs
+    price_basis_at: Optional[str] = None                     # when USD price tracking began
+    price_stale_since: Optional[str] = None
+    missing_since: Optional[str] = None                      # pool absent from the yields feed
+    price_pnl_usd: float = 0.0     # what simply holding the two tokens would have made or lost
+    rewards_accrued_usd: float = 0.0
+    last_reward_apr: float = 0.0
+    last_hold_apr: float = 0.0     # forward net APR of keeping the position (entry cost sunk)
+    gap_hours: float = 0.0         # hours booked conservatively because the bot was not running
+    drift_apr: float = 0.0         # expected annual drift of the ratio (yield-bearing legs)
 
     @property
     def net_pnl_usd(self) -> float:
-        return self.fees_accrued_usd + self.il_usd
+        """LP result versus simply holding the two tokens: fees + rewards + IL."""
+        return self.fees_accrued_usd + self.rewards_accrued_usd + self.il_usd
+
+    @property
+    def total_pnl_usd(self) -> float:
+        """Unrealised USD P&L including market moves and entry costs (exit costs excluded)."""
+        return self.value_usd - self.size_usd - self.entry_cost_usd
 
     def to_dict(self) -> Dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict) -> "Position":
-        return cls(**d)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 @dataclass

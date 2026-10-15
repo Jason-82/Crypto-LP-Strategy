@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
 import time
-from typing import List, Optional
+import traceback
+from typing import Callable, List, Optional, Tuple
 
 from .config import Config, load_config
 from .executors import LiveExecutor, PaperExecutor
@@ -25,7 +27,9 @@ from .models import Opportunity, Pool
 from .prices import DefiLlamaPrices, NullPrices, VolEstimator
 from .scoring import rank
 from .sources import DefiLlamaYields, FilePoolSource
-from .state import load_state, save_state
+from .state import InstanceLock, load_state, save_state
+
+NETWORK_ERRORS = (OSError, ValueError, http.client.HTTPException)
 
 DEFAULT_FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "pools_sample.json")
 
@@ -47,9 +51,14 @@ def _prices(arg: str, cfg: Config):
 def _fetch(source) -> List[Pool]:
     try:
         return source.fetch()
-    except Exception as exc:  # network / parse
+    except NETWORK_ERRORS as exc:
         print(f"error: could not fetch pools from {source.name}: {exc}", file=sys.stderr)
         return []
+
+
+def _vol(cfg: Config, prices_arg: str) -> VolEstimator:
+    return VolEstimator(_prices(prices_arg, cfg), cfg.price_history_days,
+                        refresh_s=cfg.vol_refresh_hours * 3600.0, retry_s=cfg.price_retry_hours * 3600.0)
 
 
 def print_scan(opps: List[Opportunity], tally, top: int, explain: bool, why, pools: List[Pool],
@@ -90,14 +99,15 @@ def cmd_scan(args) -> int:
     pools = _fetch(_source(args.source, cfg))
     if not pools:
         return 1
-    vol = VolEstimator(_prices(args.prices, cfg), cfg.price_history_days)
-    opps, tally, why = rank(pools, cfg, vol)
+    vol = _vol(cfg, args.prices)
+    opps, tally, why = rank(pools, cfg, vol, equity=cfg.starting_cash_usd)
     print_scan(opps, tally, args.top, args.explain, why, pools, vol, cfg)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
             json.dump([{**o.pool.to_dict(), "fee_apr": o.fee_apr, "reward_apr": o.reward_apr,
                         "sigma": o.sigma, "vol_source": o.vol_source, "amp": o.amp,
-                        "expected_il_apr": o.expected_il_apr, "cost_drag_apr": o.cost_drag_apr,
+                        "range_width": o.range_width, "expected_il_apr": o.expected_il_apr,
+                        "cost_drag_apr": o.cost_drag_apr, "size_usd": o.size_usd,
                         "net_apr": o.net_apr, "score": o.score, "notes": o.notes}
                        for o in opps[:args.top]], fh, indent=1)
         print(f"wrote {args.json}")
@@ -105,58 +115,169 @@ def cmd_scan(args) -> int:
 
 
 def _build(cfg: Config, prices_arg: str):
-    state = load_state(cfg.state_path, cfg.starting_cash_usd)
+    state = load_state(cfg.state_path, cfg.starting_cash_usd,
+                       warn=lambda m: print(f"warning: {m}", file=sys.stderr))
     if cfg.mode == "live":
         executor = LiveExecutor(cfg)
         state.cash_usd = executor.cash_usd()
     else:
         executor = PaperExecutor(cfg, state.cash_usd)
-    vol = VolEstimator(_prices(prices_arg, cfg), cfg.price_history_days)
-    return state, executor, vol
+    return state, executor, _vol(cfg, prices_arg)
+
+
+def _sleep(seconds: float, kill_path: str) -> bool:
+    """Sleep in short slices; return True early if the kill switch appears."""
+    end = time.monotonic() + seconds
+    while True:
+        if os.path.exists(kill_path):
+            return True
+        left = end - time.monotonic()
+        if left <= 0:
+            return False
+        time.sleep(min(10.0, left))
+
+
+def _fetch_pools(source, cfg: Config, attempts: int, say: Callable[[str], None]) -> Tuple[List[Pool], bool]:
+    """Fetch the universe with retries. Returns (pools, feed_up). A feed smaller than
+    ``min_feed_pools`` is returned for marking but treated as down (no entries, no
+    missing-pool clock)."""
+    waits = [20, 60, 120]
+    pools: List[Pool] = []
+    for attempt in range(max(attempts, 1)):
+        try:
+            pools = source.fetch()
+            if getattr(source, "skipped", 0):
+                say(f"skipped {source.skipped} malformed pool records")
+            if len(pools) >= cfg.min_feed_pools:
+                return pools, True
+            say(f"yields feed returned only {len(pools)} pools (expected {cfg.min_feed_pools}+)")
+        except NETWORK_ERRORS as exc:
+            say(f"yields feed attempt {attempt + 1} failed: {exc}")
+        except Exception as exc:  # unexpected payload or parser bug: still protect positions
+            say(f"yields feed attempt {attempt + 1} failed unexpectedly: {type(exc).__name__}: {exc}")
+        if attempt < attempts - 1 and _sleep(waits[min(attempt, len(waits) - 1)], cfg.kill_switch_path):
+            break
+    return pools, False
+
+
+def _print_report(report, extra: str = "", quiet_if_empty: bool = False) -> None:
+    if quiet_if_empty and not (report["actions"] or report["notes"] or report["warnings"]):
+        return
+    print(f"[{report['now']}] equity ${report['equity']:,.2f} cash ${report['cash']:,.2f} "
+          f"open {report['open']}{extra}")
+    for a in report["actions"]:
+        print(f"    {a['kind']:<12} {a['symbol']:<22} ${a['usd']:>10,.2f}  {a['note']}")
+    for n in report["notes"]:
+        print(f"    note         {n}")
+    for w in report["warnings"]:
+        print(f"    warning      {w}")
 
 
 def cmd_run(args) -> int:
     cfg = load_config(args.config)
     if args.chains:
         cfg.chains = args.chains
+    if args.source != "live":
+        cfg.min_feed_pools = 1  # a file snapshot is small, but an empty one is still a dead feed
+    try:
+        lock = InstanceLock(cfg.state_path).__enter__()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        return _run_loop(args, cfg)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _run_loop(args, cfg: Config) -> int:
     state, executor, vol = _build(cfg, args.prices)
     manager = Manager(cfg, state, executor, vol)
     source = _source(args.source, cfg)
+    say = lambda m: print(f"    warning      {m}", file=sys.stderr)  # noqa: E731
     print(f"mode={cfg.mode} equity=${state.equity():,.2f} cash=${state.cash_usd:,.2f} "
           f"open={len(state.open_positions)} state={cfg.state_path}")
     while True:
-        pools = _fetch(source)
-        if pools:
-            opps, tally, _why = rank(pools, cfg, vol)
-            report = manager.tick(pools, opps)
+        kill = os.path.exists(cfg.kill_switch_path)
+        cycle_failed = False
+        try:
+            pools, feed_up = _fetch_pools(source, cfg, 1 if kill else cfg.fetch_retries, say)
+            # 1. protect: mark every position and run the hard exits before anything slow
+            report = manager.protect(pools, feed_up=feed_up, record=not feed_up or kill)
             save_state(cfg.state_path, state)
-            print(f"[{report['now']}] equity ${report['equity']:,.2f} cash ${report['cash']:,.2f} "
-                  f"open {report['open']} candidates {len(opps)}")
-            for a in report["actions"]:
-                print(f"    {a['kind']:<12} {a['symbol']:<22} ${a['usd']:>10,.2f}  {a['note']}")
-        if args.once or os.path.exists(cfg.kill_switch_path):
-            break
-        time.sleep(max(args.interval_min, 1) * 60)
-    return 0
+            _print_report(report, "" if feed_up else "  (yields feed down: holding)", quiet_if_empty=feed_up and not kill)
+            # 2. full cycle: soft exits, entries, rotation
+            if feed_up and not os.path.exists(cfg.kill_switch_path):
+                opps, _tally, _why = rank(pools, cfg, vol, equity=state.equity(), budget_s=cfg.prefetch_budget_s)
+                report = manager.tick(pools, opps, feed_up=True, do_mark=False)
+                save_state(cfg.state_path, state)
+                st = vol.stats()
+                _print_report(report, f" candidates {len(opps)} | vol from history {st['history']}, "
+                                      f"heuristic {st['heuristic']}")
+                for w in vol.warnings[:5]:
+                    print(f"    warning      {w}")
+                del vol.warnings[:]
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # keep the loop alive; positions must not go unmanaged
+            cycle_failed = True
+            print(f"error in cycle: {type(exc).__name__}: {exc}", file=sys.stderr)
+            traceback.print_exc(limit=4)
+            try:
+                save_state(cfg.state_path, state)
+            except Exception as exc2:
+                print(f"error saving state: {exc2}", file=sys.stderr)
+        if os.path.exists(cfg.kill_switch_path):
+            if not state.open_positions:
+                print("kill switch: all positions closed; stopping")
+                return 0
+            print(f"kill switch: {len(state.open_positions)} position(s) still open; retrying in 60s",
+                  file=sys.stderr)
+            if args.once:
+                return 3
+            time.sleep(60)
+            continue
+        if args.once:
+            return 1 if cycle_failed else 0
+        _sleep(max(args.interval_min, 1) * 60, cfg.kill_switch_path)
 
 
 def cmd_status(args) -> int:
     cfg = load_config(args.config)
-    state = load_state(cfg.state_path, cfg.starting_cash_usd)
-    print(f"mode={cfg.mode} updated={state.updated_at} equity=${state.equity():,.2f} "
-          f"cash=${state.cash_usd:,.2f}")
+    state = load_state(cfg.state_path, cfg.starting_cash_usd,
+                       warn=lambda m: print(f"warning: {m}", file=sys.stderr))
+    eq = state.equity()
+    print(f"mode={cfg.mode} updated={state.updated_at} equity=${eq:,.2f} cash=${state.cash_usd:,.2f} "
+          f"vs ${cfg.starting_cash_usd:,.2f} start ({eq - cfg.starting_cash_usd:+,.2f})")
     if state.open_positions:
-        print(f"\n{'pair':<22} {'chain':<10} {'project':<22} {'size':>10} {'fees':>9} {'IL':>9} "
-              f"{'value':>10} {'apy':>6} {'opened':<20}")
+        print(f"\n{'pair':<16} {'chain':<9} {'project':<20} {'size':>9} {'market':>8} {'IL':>8} "
+              f"{'fees':>8} {'rewards':>8} {'value':>9} {'P&L':>8} {'fwd net':>8}  flags")
         for p in state.open_positions:
-            print(f"{p.symbol:<22} {p.chain:<10} {p.project:<22} {p.size_usd:>10,.2f} "
-                  f"{p.fees_accrued_usd:>9,.2f} {p.il_usd:>9,.2f} {p.value_usd:>10,.2f} "
-                  f"{p.last_apy:>6.1f} {p.opened_at:<20}")
+            flags = []
+            if p.out_of_range_since:
+                flags.append("out-of-range")
+            if p.price_stale_since:
+                flags.append("unpriced")
+            if p.missing_since:
+                flags.append("missing")
+            if not p.price_basis_at:
+                flags.append("market-moves-not-tracked")
+            print(f"{p.symbol[:16]:<16} {p.chain[:9]:<9} {p.project[:20]:<20} {p.size_usd:>9,.2f} "
+                  f"{p.price_pnl_usd:>8,.2f} {p.il_usd:>8,.2f} {p.fees_accrued_usd:>8,.2f} "
+                  f"{p.rewards_accrued_usd:>8,.2f} {p.value_usd:>9,.2f} {p.total_pnl_usd:>8,.2f} "
+                  f"{p.last_hold_apr * 100:>7.1f}%  {' '.join(flags)}")
+        print("\nmarket = what holding the two tokens made; IL = LP shortfall vs holding; "
+              "P&L includes entry costs; fwd net = expected yield from here")
     if state.closed:
         realised = sum(p.realised_pnl_usd or 0.0 for p in state.closed)
         print(f"\nclosed: {len(state.closed)} positions, realised pnl ${realised:+,.2f}")
         for p in state.closed[-10:]:
             print(f"  {p.closed_at} {p.symbol:<22} {p.realised_pnl_usd:+9,.2f}  {p.close_reason}")
+    notes = [r for r in state.ledger if r.get("kind") == "note"][-5:]
+    if notes:
+        print("\nrecent notes:")
+        for r in notes:
+            print(f"  {r['t']} {r['note']}")
     return 0
 
 
@@ -174,22 +295,25 @@ def cmd_il(args) -> int:
 
 
 def cmd_prices(args) -> int:
-    """Fetch history for a few coin keys and report what came back. For debugging the feed."""
+    """Fetch history and current prices for a few coin keys and report what came back."""
     from .prices import realised_vol
     cfg = load_config(args.config)
     src = DefiLlamaPrices(cfg.prices_url, cfg.http_timeout_s)
     series = src.history(args.keys, args.days)
+    current = src.current(args.keys)
     for k in args.keys:
         pts = series.get(k, [])
+        cur = current.get(k)
+        cur_s = f"current {cur:.6g}" if cur else "no current price"
         if pts:
             rv = realised_vol(pts)
-            print(f"{k}: {len(pts)} points, first {pts[0]:.6g}, last {pts[-1]:.6g}, "
-                  f"annualised vol {rv:.2f}" if rv is not None else f"{k}: {len(pts)} points (too few for vol)")
+            vol_s = f"annualised vol {rv:.2f}" if rv is not None else "too few points for vol"
+            print(f"{k}: {len(pts)} daily points, first {pts[0][1]:.6g}, last {pts[-1][1]:.6g}, {vol_s}, {cur_s}")
         else:
-            print(f"{k}: no data")
+            print(f"{k}: no history, {cur_s}")
     for e in src.errors:
         print(f"error: {e}")
-    return 0 if series and not src.errors else 1
+    return 0 if series and current and not src.errors else 1
 
 
 def cmd_selftest(_args) -> int:
@@ -245,5 +369,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # never crash on a symbol like USD₮0 in a cp1252 console
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     return args.fn(args)

@@ -43,13 +43,15 @@ class PaperExecutor(Executor):
     def cash_usd(self) -> float:
         return self._cash
 
-    def _cost(self, chain: str, size_usd: float) -> float:
-        return self.cfg.gas_for(chain) / 2.0 + size_usd * self.cfg.slippage_bps_per_side / 10_000.0
+    def _cost(self, chain: str, size_usd: float, stable: bool = False) -> float:
+        """Gas for one leg, slippage on one side, and a bridge hop when ``chain`` is not the
+        home chain where idle cash sits."""
+        return self.cfg.one_way_cost(chain, size_usd, stable)
 
     def open(self, opp: Opportunity, size_usd: float) -> Fill:
         if size_usd <= 0 or size_usd > self._cash:
             return Fill(ok=False, note="insufficient cash")
-        cost = self._cost(opp.pool.chain, size_usd)
+        cost = self._cost(opp.pool.chain, size_usd, opp.stable_pair)
         placed = size_usd - cost
         if placed <= 0:
             return Fill(ok=False, note="size smaller than entry cost")
@@ -59,7 +61,7 @@ class PaperExecutor(Executor):
 
     def close(self, pos: Position) -> Fill:
         gross = max(pos.value_usd, 0.0)
-        cost = self._cost(pos.chain, gross)
+        cost = self._cost(pos.chain, gross, pos.sigma < self.cfg.stable_sigma_threshold)
         returned = max(gross - cost, 0.0)
         self._cash += returned
         return Fill(ok=True, size_usd=returned, cost_usd=cost, tx=f"paper-{uuid.uuid4().hex[:10]}",

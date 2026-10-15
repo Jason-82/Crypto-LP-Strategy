@@ -62,19 +62,26 @@ class Config:
     max_apy_pct: float = 250.0             # above this the number is almost always a trap
     max_reward_share: float = 0.6          # emissions / total APY
     min_volume_tvl_ratio_7d: float = 0.0   # 0 disables; 0.05 means >=5 % weekly turnover
-    reject_outliers: bool = True
+    reject_outliers: bool = True           # entry filter only; the flag is not an exit signal
+    allow_unknown_age: bool = False        # pools with no age data are rejected by default
 
     # --- scoring --------------------------------------------------------------------
     reward_haircut: float = 0.5            # value emissions at 50 cents on the dollar
     horizon_days: int = 30                 # holding period used to amortise costs
     default_range_width: float = 3.0       # symmetric CL range [P/3, P*3]; None = full range
     cl_fee_amp_share: float = 0.0          # fraction of IL amplification credited to fees (0 = pool average)
-    stable_sigma_threshold: float = 0.15   # below this, a CL pool is scored without the range model
+    stable_sigma_threshold: float = 0.15   # below this the pair is treated as a stable/pegged pair
+    stable_range_sigmas: float = 2.0       # pegged pairs in CL pools: range half-width in horizon sigmas (min 1 %)
+    peg_pair_sigma: float = 0.05           # pairs this tightly correlated get a divergence stop
     max_sigma: float = 1.5                 # skip pairs more volatile than this (annualised)
     max_expected_il_apr: float = 0.35      # skip when expected IL alone exceeds 35 %/yr
     min_net_apr: float = 0.04              # 4 % net after IL and costs
     slippage_bps_per_side: float = 30.0
+    stable_slippage_bps_per_side: float = 5.0   # pegged pairs swap at a fraction of the cost
     gas_roundtrip_usd: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_GAS_ROUNDTRIP_USD))
+    home_chain: str = "arbitrum"           # where idle paper cash is assumed to sit
+    bridge_cost_usd: float = 3.0           # fixed cost per bridge hop to or from another chain
+    bridge_bps: float = 5.0                # plus this share of the amount bridged
 
     # --- sizing ---------------------------------------------------------------------
     max_positions: int = 8
@@ -90,22 +97,46 @@ class Config:
     il_stop_pct: float = 0.03              # exit when fees + IL < -3 % of size
     price_move_stop: float = 0.0           # 0 disables; else exit when |ln k| exceeds this
     out_of_range_grace_hours: float = 12.0
-    apy_decay_ratio: float = 0.5           # exit when current APY < 50 % of entry APY
-    tvl_drop_ratio: float = 0.5            # exit when TVL < 50 % of entry TVL
+    apy_decay_ratio: float = 0.5           # exit when smoothed fee APR < 50 % of the fee APR bought on (0 = off)
+    tvl_drop_ratio: float = 0.5            # exit when price-adjusted TVL < 50 % of entry TVL
     min_hold_hours: float = 48.0           # soft exits wait this long (costs must be earned back)
+    min_hold_apr: float = 0.0              # keep a position while its forward yield (no costs) is above this
     max_hold_days: int = 90
     rotation_margin_apr: float = 0.08      # need +8 pp net APR to justify switching
+    max_rotations_per_cycle: int = 1
     reentry_cooldown_hours: float = 24.0   # do not re-enter a pool we just exited
     daily_loss_limit_pct: float = 0.05     # stop opening new positions after a -5 % day
+    depeg_stop_pct: float = 0.02           # exit when a USD stablecoin leg trades 2 % off $1
+    missing_grace_hours: float = 24.0      # exit when a pool is absent from the feed this long
+    price_stale_hours: float = 6.0         # exit when a position cannot be priced this long
+    gap_hours: float = 3.0                 # marks further apart than this are booked conservatively
 
     # --- data ----------------------------------------------------------------------------
     yields_url: str = "https://yields.llama.fi/pools"
     prices_url: str = "https://coins.llama.fi"
     price_history_days: int = 90
     http_timeout_s: int = 30
+    fetch_retries: int = 3                 # attempts at the yields feed per cycle
+    min_feed_pools: int = 1000             # a live feed smaller than this is treated as down
+    prefetch_budget_s: float = 120.0       # max time per cycle spent fetching price history
+    vol_refresh_hours: float = 24.0        # refresh price history (and so volatility) this often
+    price_retry_hours: float = 6.0         # retry coins that returned no history after this long
 
     def gas_for(self, chain: str) -> float:
         return self.gas_roundtrip_usd.get(chain.lower(), self.gas_roundtrip_usd.get("default", 3.0))
+
+    def bridge_for(self, chain: str, amount_usd: float) -> float:
+        """One-way cost of moving funds between the home chain and ``chain``."""
+        if chain.strip().lower() == self.home_chain.strip().lower():
+            return 0.0
+        return self.bridge_cost_usd + max(amount_usd, 0.0) * self.bridge_bps / 10_000.0
+
+    def one_way_cost(self, chain: str, amount_usd: float, stable: bool = False) -> float:
+        """Gas for one leg (mint or burn), slippage on one side, and one bridge hop."""
+        bps = self.stable_slippage_bps_per_side if stable else self.slippage_bps_per_side
+        return (self.gas_for(chain) / 2.0
+                + max(amount_usd, 0.0) * bps / 10_000.0
+                + self.bridge_for(chain, amount_usd))
 
     def to_dict(self) -> Dict:
         return asdict(self)

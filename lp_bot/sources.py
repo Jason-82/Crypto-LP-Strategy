@@ -8,16 +8,24 @@ from __future__ import annotations
 
 import json
 import urllib.request
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .models import Pool
 
 
 def _f(v) -> Optional[float]:
     try:
-        return None if v is None else float(v)
+        x = None if v is None else float(v)
     except (TypeError, ValueError):
         return None
+    if x is not None and x != x:  # NaN
+        return None
+    return x
+
+
+def _i(v) -> Optional[int]:
+    x = _f(v)
+    return None if x is None else int(x)
 
 
 def parse_llama_pool(d: Dict) -> Pool:
@@ -44,7 +52,7 @@ def parse_llama_pool(d: Dict) -> Pool:
         il_risk=str(d.get("ilRisk", "yes")),
         exposure=str(d.get("exposure", "multi")),
         outlier=bool(d.get("outlier", False)),
-        age_days=int(d["count"]) if d.get("count") is not None else None,
+        age_days=_i(d.get("count")),
         underlying_tokens=[str(t) for t in (d.get("underlyingTokens") or []) if t],
         volume_usd_1d=_f(d.get("volumeUsd1d")),
         volume_usd_7d=_f(d.get("volumeUsd7d")),
@@ -53,8 +61,23 @@ def parse_llama_pool(d: Dict) -> Pool:
     )
 
 
+def parse_records(data) -> Tuple[List[Pool], int]:
+    """Parse records one at a time; a malformed record is skipped, not fatal."""
+    pools: List[Pool] = []
+    skipped = 0
+    for d in data or []:
+        try:
+            if not isinstance(d, dict) or not d.get("pool"):
+                raise ValueError("no pool id")
+            pools.append(parse_llama_pool(d))
+        except (TypeError, ValueError, KeyError, AttributeError):
+            skipped += 1
+    return pools, skipped
+
+
 class PoolSource:
     name = "base"
+    skipped = 0      # malformed records dropped by the last fetch
 
     def fetch(self) -> List[Pool]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -74,7 +97,8 @@ class DefiLlamaYields(PoolSource):
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
             payload = json.load(resp)
         data = payload.get("data", payload) if isinstance(payload, dict) else payload
-        return [parse_llama_pool(d) for d in data]
+        pools, self.skipped = parse_records(data)
+        return pools
 
 
 class FilePoolSource(PoolSource):
@@ -90,7 +114,8 @@ class FilePoolSource(PoolSource):
         with open(self.path, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
         data = payload.get("data", payload) if isinstance(payload, dict) else payload
-        return [parse_llama_pool(d) for d in data]
+        pools, self.skipped = parse_records(data)
+        return pools
 
 
 class MultiSource(PoolSource):
